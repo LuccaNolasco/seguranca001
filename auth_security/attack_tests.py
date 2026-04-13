@@ -10,9 +10,9 @@ import time
 # Com MD5, isso leva MILISSEGUNDOS — é assustadoramente rápido.
 
 senhas_comuns = [
-    "123456", "password", "admin", "qwerty", "12345678",
+    "password", "admin", "qwerty", "12345678",
     "abc123", "monkey", "master", "dragon", "111111",
-    "letmein", "trustno1", "iloveyou", "sunshine", "princess",
+    "letmein", "trustno1", "iloveyou", "sunshine", "princess", "123456"
 ]
 
 # Esse é o hash MD5 de "password" — uma das senhas mais usadas no mundo

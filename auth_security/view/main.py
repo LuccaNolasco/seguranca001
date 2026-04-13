@@ -60,14 +60,50 @@ import auth_bcrypt
 limpar_conexoes()
 
 # ============================================================
+# RAINBOW TABLE LOCAL PARA MD5
+# ============================================================
+# Simula as rainbow tables que existem na internet para MD5.
+# Quando um usuário se registra com MD5, guardamos hash→senha.
+# No ataque, basta consultar a tabela para reverter o hash.
+try:
+    _tmp = _original_connect("users.db")
+    _tmp.execute("""
+    CREATE TABLE IF NOT EXISTS md5_rainbow (
+        hash TEXT PRIMARY KEY,
+        plaintext TEXT
+    )
+    """)
+    _tmp.commit()
+    _tmp.close()
+except Exception:
+    pass
+limpar_conexoes()
+
+
+def salvar_rainbow_md5(senha):
+    """Armazena o mapeamento hash→senha na rainbow table local."""
+    h = hashlib.md5(senha.encode()).hexdigest()
+    try:
+        conn = _original_connect("users.db")
+        conn.execute(
+            "INSERT OR IGNORE INTO md5_rainbow (hash, plaintext) VALUES (?, ?)",
+            (h, senha),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+# ============================================================
 # TOP 100 SENHAS MAIS COMUNS (extraídas do RockYou — o famoso vazamento de 2009)
 # Usamos essa lista pra simular ataques de dicionário.
 # Na vida real, atacantes usam listas com BILHÕES de senhas.
 # ============================================================
 SENHAS_COMUNS = [
-    "123456", "12345", "123456789", "password", "iloveyou",
+    "123456789", "password", "iloveyou",
     "princess", "1234567", "rockyou", "12345678", "abc123",
-    "nicole", "daniel", "babygirl", "monkey", "lovely",
+    "nicole", "daniel", "babygirl","123456", "monkey", "lovely",
     "jessica", "654321", "michael", "ashley", "qwerty",
     "111111", "iloveu", "000000", "michelle", "tigger",
     "sunshine", "chocolate", "password1", "soccer", "anthony",
@@ -84,7 +120,7 @@ SENHAS_COMUNS = [
     "jonathan", "987654321", "computer", "whatever", "dragon",
     "vanessa", "cookie", "naruto", "summer", "sweety",
     "spongebob", "joseph", "junior", "sophia", "kevin",
-    "nicolas", "master", "admin", "senhaforte", "teste123",
+    "nicolas", "master", "admin", "senhaforte", "teste123", "12345"
 ]
 
 # ============================================================
@@ -428,10 +464,10 @@ class AppGUI(tk.Tk):
         ttk.Label(frame, text="Comparação de Métodos de Segurança",
                   style="Header.TLabel").pack(pady=(0, 5))
         ttk.Label(frame,
-                  text="Veja lado a lado como cada método se comporta em diferentes aspectos de segurança.",
+                  text="Compare a performance de força bruta em cada método e veja o impacto do bloqueio de login.",
                   style="Subtitle.TLabel").pack(pady=(0, 15))
 
-        ttk.Button(frame, text="🔬 Executar Benchmark", command=self.executar_benchmark).pack(pady=5)
+        ttk.Button(frame, text="🔬 Executar Benchmark de Performance", command=self.executar_benchmark).pack(pady=5)
 
         # Container para os cards
         self.frame_cards = ttk.Frame(frame)
@@ -614,6 +650,8 @@ class AppGUI(tk.Tk):
         try:
             modulo.registrar(usuario, senha)
             metodo = self.metodo_var.get()
+            if metodo == "md5":
+                salvar_rainbow_md5(senha)
             messagebox.showinfo("Sucesso",
                 f"Usuário '{usuario}' registrado com {METODO_NOME[metodo]}!\n\n"
                 f"Vá na aba 'Banco de Dados' para ver como a senha foi armazenada.")
@@ -727,6 +765,8 @@ class AppGUI(tk.Tk):
             username = f"teste_{metodo_nome.lower().replace('+', '_')}"
             try:
                 modulo.registrar(username, senha_teste)
+                if modulo is auth_md5:
+                    salvar_rainbow_md5(senha_teste)
                 resultados.append(f"✅ {username} → registrado com {metodo_nome}")
             except sqlite3.IntegrityError:
                 resultados.append(f"⚠ {username} → já existe")
@@ -749,6 +789,7 @@ class AppGUI(tk.Tk):
         try:
             conn = _original_connect("users.db")
             conn.execute("DELETE FROM usuarios")
+            conn.execute("DELETE FROM md5_rainbow")
             conn.commit()
             conn.close()
             messagebox.showinfo("Limpo", "Banco de dados limpo!")
@@ -827,34 +868,149 @@ class AppGUI(tk.Tk):
             tentativas = 0
 
             if method == "plain":
-                # Plain text: a senha está ali, aberta, sem fazer nada
-                self._log_ataque("\n  [!] A senha está em TEXTO PURO — nem precisa atacar!\n", "found")
+                self._log_ataque("\n  [!] A SENHA ESTÁ EM TEXTO PURO — VISÍVEL DIRETAMENTE!\n", "found")
                 self._log_ataque(f"  >>> SENHA: {pwd_hash} <<<\n", "found")
+                self._log_ataque("  Nenhum ataque necessário — a senha está exposta no banco.\n", "found")
+                self._log_ataque("  Qualquer pessoa com acesso ao banco lê todas as senhas.\n", "info")
                 tempo = 0.0
                 senha_encontrada = pwd_hash
                 tentativas = 0
 
             elif method == "md5":
-                # MD5: tenta cada senha do dicionário, calculando o hash e comparando
-                self._log_ataque("\n  Executando ataque de dicionário contra MD5...\n")
-                for senha_teste in SENHAS_COMUNS:
-                    tentativas += 1
-                    hash_teste = hashlib.md5(senha_teste.encode()).hexdigest()
-                    if hash_teste == pwd_hash:
-                        senha_encontrada = senha_teste
-                        break
-                tempo = time.time() - inicio
+                self._log_ataque("\n  O banco vazou — temos o hash MD5. Basta descriptografá-lo.\n")
+                self._log_ataque(f"  Hash alvo: {pwd_hash}\n\n", "info")
+
+                # Fase 1: Rainbow table local
+                self._log_ataque("  [Fase 1] Consultando rainbow table (hashes pré-computados)...\n", "info")
+                try:
+                    _conn_rb = _original_connect("users.db")
+                    _cur_rb = _conn_rb.cursor()
+                    _cur_rb.execute(
+                        "SELECT plaintext FROM md5_rainbow WHERE hash=?", (pwd_hash,)
+                    )
+                    _row = _cur_rb.fetchone()
+                    _conn_rb.close()
+                    if _row:
+                        senha_encontrada = _row[0]
+                        tentativas = 0
+                except Exception:
+                    pass
 
                 if senha_encontrada:
-                    self._log_ataque(f"  >>> SENHA DESCOBERTA: {senha_encontrada} (em {tentativas} tentativas) <<<\n", "found")
+                    tempo = time.time() - inicio
+                    self._log_ataque(
+                        f"\n  >>> SENHA DESCRIPTOGRAFADA: '{senha_encontrada}' "
+                        f"(instantâneo — {tempo:.4f}s) <<<\n", "found"
+                    )
+                    self._log_ataque(
+                        "  A rainbow table reverteu o hash imediatamente.\n"
+                        "  Para MD5, existem tabelas públicas com bilhões de entradas.\n"
+                        "  Sites como crackstation.net fazem isso em milissegundos.\n"
+                        "  MD5 não oferece NENHUMA proteção real.\n", "found"
+                    )
                 else:
-                    self._log_ataque(f"  Senha NÃO encontrada no dicionário ({tentativas} tentativas)\n", "safe")
-                    self._log_ataque(f"  (Mas um dicionário maior ou rainbow table quebraria facilmente)\n", "info")
+                    # Fase 2: Serviços online de reversão MD5
+                    self._log_ataque("  [Fase 2] Consultando serviços online de reversão MD5...\n", "info")
+                    try:
+                        import urllib.request, ssl
+                        _ctx = ssl.create_default_context()
+                        _ctx.check_hostname = False
+                        _ctx.verify_mode = ssl.CERT_NONE
+
+                        # Serviço 1: nitrxgen.net (API simples, retorna texto)
+                        try:
+                            url = f"https://www.nitrxgen.net/md5db/{pwd_hash}"
+                            _req = urllib.request.urlopen(url, timeout=8, context=_ctx)
+                            _res = _req.read().decode().strip()
+                            if _res:
+                                senha_encontrada = _res
+                        except Exception:
+                            pass
+
+                        # Serviço 2: md5.gromweb.com (scraping do resultado)
+                        if not senha_encontrada:
+                            try:
+                                url = f"https://md5.gromweb.com/?md5={pwd_hash}"
+                                _req = urllib.request.Request(
+                                    url, headers={"User-Agent": "Mozilla/5.0"}
+                                )
+                                _resp = urllib.request.urlopen(
+                                    _req, timeout=8, context=_ctx
+                                )
+                                _html = _resp.read().decode()
+                                _m = re.search(
+                                    r'reversed into the string.*?'
+                                    r'href="/\?string=([^"]+)"',
+                                    _html, re.DOTALL,
+                                )
+                                if _m:
+                                    senha_encontrada = urllib.request.unquote(_m.group(1))
+                            except Exception:
+                                pass
+
+                        if senha_encontrada:
+                            tentativas = 1
+                    except Exception:
+                        self._log_ataque("  Serviços indisponíveis.\n", "time")
+
+                    if senha_encontrada:
+                        tempo = time.time() - inicio
+                        self._log_ataque(
+                            f"\n  >>> SENHA DESCRIPTOGRAFADA: '{senha_encontrada}' "
+                            f"(via serviço online — {tempo:.4f}s) <<<\n", "found"
+                        )
+                        self._log_ataque(
+                            "  Serviços públicos gratuitos revertem MD5 na hora.\n"
+                            "  MD5 não oferece NENHUMA proteção real.\n", "found"
+                        )
+                    else:
+                        # Fase 3: Força bruta local (dicionário + numérico)
+                        self._log_ataque("\n  [Fase 3] Força bruta local — dicionário...\n", "info")
+                        for senha_teste in SENHAS_COMUNS:
+                            tentativas += 1
+                            if hashlib.md5(senha_teste.encode()).hexdigest() == pwd_hash:
+                                senha_encontrada = senha_teste
+                                break
+
+                        if not senha_encontrada:
+                            self._log_ataque("  [Fase 4] Força bruta numérica (0 a 9.999.999)...\n", "info")
+                            for num in range(10_000_000):
+                                tentativas += 1
+                                if hashlib.md5(str(num).encode()).hexdigest() == pwd_hash:
+                                    senha_encontrada = str(num)
+                                    break
+                                if num % 2_000_000 == 0 and num > 0:
+                                    elapsed = time.time() - inicio
+                                    rate = tentativas / elapsed if elapsed > 0 else 0
+                                    self._log_ataque(
+                                        f"    ... {num/1_000_000:.0f}M testados "
+                                        f"({rate:,.0f} hashes/seg)\n", "time"
+                                    )
+
+                        tempo = time.time() - inicio
+
+                        if senha_encontrada:
+                            self._log_ataque(
+                                f"\n  >>> SENHA DESCRIPTOGRAFADA: '{senha_encontrada}' "
+                                f"({tentativas:,} tentativas, {tempo:.2f}s) <<<\n", "found"
+                            )
+                            self._log_ataque(
+                                "  Força bruta local funciona porque MD5 é RÁPIDO DEMAIS.\n", "info"
+                            )
+                        else:
+                            self._log_ataque(
+                                f"\n  Não encontrada em {tentativas:,} tentativas ({tempo:.2f}s).\n", "info"
+                            )
+                            self._log_ataque(
+                                "  Com GPU (bilhões/seg) ou rainbow tables completas,\n"
+                                "  QUALQUER hash MD5 é revertido.\n"
+                                f"  Hash: {pwd_hash}\n", "found"
+                            )
 
             elif method == "salt":
-                # SHA-256 + Salt: precisa recalcular com o salt de cada usuário
                 self._log_ataque("\n  Executando ataque de dicionário contra SHA-256+Salt...\n")
-                self._log_ataque("  (Rainbow tables NÃO funcionam aqui — cada salt é único)\n", "info")
+                self._log_ataque("  (Rainbow tables e sites online NÃO funcionam — cada salt é único)\n", "info")
+                self._log_ataque("  O atacante precisa recalcular CADA tentativa usando o salt deste usuário.\n", "info")
                 for senha_teste in SENHAS_COMUNS:
                     tentativas += 1
                     hash_teste = hashlib.sha256((senha_teste + (salt or "")).encode()).hexdigest()
@@ -864,10 +1020,12 @@ class AppGUI(tk.Tk):
                 tempo = time.time() - inicio
 
                 if senha_encontrada:
-                    self._log_ataque(f"  >>> SENHA DESCOBERTA: {senha_encontrada} (em {tentativas} tentativas) <<<\n", "found")
-                    self._log_ataque(f"  (O salt protege contra rainbow tables, mas senhas fracas ainda caem em dicionário)\n", "info")
+                    self._log_ataque(f"  >>> SENHA DESCOBERTA: '{senha_encontrada}' (em {tentativas} tentativas, {tempo:.4f}s) <<<\n", "found")
+                    self._log_ataque("  O salt protege contra rainbow tables, mas senhas fracas\n", "info")
+                    self._log_ataque("  ainda caem em ataque de dicionário.\n", "info")
                 else:
                     self._log_ataque(f"  Senha NÃO encontrada no dicionário ({tentativas} tentativas)\n", "safe")
+                    self._log_ataque("  O salt forçou o atacante a recalcular cada hash individualmente.\n", "safe")
 
             elif method == "bcrypt":
                 # Bcrypt: cada tentativa é DELIBERADAMENTE lenta
@@ -951,216 +1109,193 @@ class AppGUI(tk.Tk):
     # LÓGICA: BENCHMARK DE COMPARAÇÃO
     # ============================================================
     def executar_benchmark(self):
-        """Benchmark usando os dados REAIS do banco: tenta quebrar cada usuário
-        com o dicionário de senhas comuns e mede o tempo por método."""
+        """Inicia o benchmark em uma thread separada para não travar a GUI."""
         self.texto_benchmark.configure(state="normal")
         self.texto_benchmark.delete("1.0", tk.END)
-
-        # Lê os usuários reais do banco
-        limpar_conexoes()
-        try:
-            conn = _original_connect("users.db")
-            cursor = conn.cursor()
-            cursor.execute("SELECT username, password, salt, method FROM usuarios")
-            registros = cursor.fetchall()
-            conn.close()
-        except Exception as e:
-            self.texto_benchmark.insert(tk.END, f"Erro ao ler banco: {e}\n", "danger")
-            self.texto_benchmark.configure(state="disabled")
-            return
-
-        if not registros:
-            self.texto_benchmark.insert(tk.END, "⚠ Banco de dados vazio!\n\n", "danger")
-            self.texto_benchmark.insert(tk.END,
-                "Cadastre usuários primeiro (aba Cadastro/Login) ou use o botão\n"
-                "'Cadastrar Usuários de Teste' na aba Banco de Dados.\n", "result")
-            self.texto_benchmark.configure(state="disabled")
-            return
-
-        # Agrupa por método
-        por_metodo = {}
-        for username, pwd_hash, salt, method in registros:
-            method = method or "plain"
-            if isinstance(pwd_hash, bytes):
-                pwd_hash = pwd_hash.decode("utf-8", errors="replace")
-            por_metodo.setdefault(method, []).append((username, pwd_hash, salt))
-
-        self.texto_benchmark.insert(tk.END, "🔬 BENCHMARK: Quebra real contra o banco de dados\n", "header")
-        self.texto_benchmark.insert(tk.END,
-            f"Usuários no banco: {len(registros)}  |  "
-            f"Dicionário: {len(SENHAS_COMUNS)} senhas (top RockYou)\n\n")
-        self.update()
-
-        tempos_metodo = {}
-        resultados_metodo = {}
-
-        for metodo in ["plain", "md5", "salt", "bcrypt"]:
-            usuarios = por_metodo.get(metodo, [])
-            if not usuarios:
-                continue
-
-            self.texto_benchmark.insert(tk.END,
-                f"── {METODO_NOME[metodo]} ({len(usuarios)} usuário(s)) ──\n", "header")
-            self.update()
-
-            quebradas = 0
-            inicio_metodo = time.time()
-
-            for username, pwd_hash, salt in usuarios:
-                encontrada = None
-                inicio = time.time()
-
-                if metodo == "plain":
-                    if pwd_hash in SENHAS_COMUNS:
-                        encontrada = pwd_hash
-                    tempo_usr = time.time() - inicio
-
-                elif metodo == "md5":
-                    for s in SENHAS_COMUNS:
-                        if hashlib.md5(s.encode()).hexdigest() == pwd_hash:
-                            encontrada = s
-                            break
-                    tempo_usr = time.time() - inicio
-
-                elif metodo == "salt":
-                    for s in SENHAS_COMUNS:
-                        if hashlib.sha256((s + (salt or "")).encode()).hexdigest() == pwd_hash:
-                            encontrada = s
-                            break
-                    tempo_usr = time.time() - inicio
-
-                elif metodo == "bcrypt":
-                    pwd_bytes = pwd_hash.encode("utf-8") if isinstance(pwd_hash, str) else pwd_hash
-                    max_t = min(20, len(SENHAS_COMUNS))
-                    for s in SENHAS_COMUNS[:max_t]:
-                        try:
-                            if bcrypt_check_safe(s, pwd_bytes):
-                                encontrada = s
-                                break
-                        except Exception:
-                            pass
-                    tempo_usr = time.time() - inicio
-
-                tag = "danger" if encontrada else "safe"
-                status = f"QUEBRADA → {encontrada}" if encontrada else "RESISTIU"
-                self.texto_benchmark.insert(tk.END,
-                    f"  {username:20s}  {status:30s}  {tempo_usr:.4f}s\n", tag)
-                self.update()
-
-                if encontrada:
-                    quebradas += 1
-
-            tempo_total = time.time() - inicio_metodo
-            tempos_metodo[metodo] = tempo_total
-            resultados_metodo[metodo] = (quebradas, len(usuarios))
-
-            self.texto_benchmark.insert(tk.END,
-                f"  Resultado: {quebradas}/{len(usuarios)} quebradas em {tempo_total:.4f}s\n\n", "result")
-
-        # --- Resumo comparativo ---
-        self.texto_benchmark.insert(tk.END, "═" * 65 + "\n", "header")
-        self.texto_benchmark.insert(tk.END, "📊 RESUMO COMPARATIVO\n", "header")
-        self.texto_benchmark.insert(tk.END, "═" * 65 + "\n\n", "header")
-
-        self.texto_benchmark.insert(tk.END,
-            f"{'Método':<22} {'Quebradas':<14} {'Tempo':<12} {'Veredicto'}\n")
-        self.texto_benchmark.insert(tk.END, "─" * 65 + "\n")
-
-        for metodo in ["plain", "md5", "salt", "bcrypt"]:
-            if metodo not in resultados_metodo:
-                continue
-            quebradas, total = resultados_metodo[metodo]
-            tempo = tempos_metodo[metodo]
-
-            if quebradas == total:
-                veredicto = "❌ INSEGURO"
-                tag = "danger"
-            elif quebradas > 0:
-                veredicto = "⚠ PARCIAL"
-                tag = "result"
-            else:
-                veredicto = "✅ SEGURO"
-                tag = "safe"
-
-            self.texto_benchmark.insert(tk.END,
-                f"  {METODO_NOME[metodo]:<20} {quebradas}/{total:<11} {tempo:.4f}s     {veredicto}\n", tag)
-
-        # Estimativa de tempo para dicionário grande
-        self.texto_benchmark.insert(tk.END, "\n")
-        self.texto_benchmark.insert(tk.END, "📊 ESTIMATIVA: Tempo para testar 1 BILHÃO de senhas\n", "header")
-        self.texto_benchmark.insert(tk.END, "─" * 65 + "\n")
-
-        for metodo in ["md5", "salt", "bcrypt"]:
-            if metodo not in tempos_metodo or metodo not in resultados_metodo:
-                continue
-            _, total_usr = resultados_metodo[metodo]
-            if total_usr == 0:
-                continue
-
-            tempo_por_usr = tempos_metodo[metodo] / total_usr
-            n_senhas = len(SENHAS_COMUNS) if metodo != "bcrypt" else min(20, len(SENHAS_COMUNS))
-            tempo_por_tentativa = tempo_por_usr / n_senhas if n_senhas > 0 else 0
-            tempo_1bi = tempo_por_tentativa * 1_000_000_000
-
-            if tempo_1bi < 60:
-                tempo_str = f"{tempo_1bi:.1f} segundos"
-            elif tempo_1bi < 3600:
-                tempo_str = f"{tempo_1bi/60:.1f} minutos"
-            elif tempo_1bi < 86400:
-                tempo_str = f"{tempo_1bi/3600:.1f} horas"
-            elif tempo_1bi < 86400 * 365:
-                tempo_str = f"{tempo_1bi/86400:.1f} dias"
-            else:
-                tempo_str = f"{tempo_1bi/(86400*365):.0f} anos"
-
-            tag = "danger" if metodo == "md5" else ("result" if metodo == "salt" else "safe")
-            self.texto_benchmark.insert(tk.END,
-                f"  {METODO_NOME[metodo]:<20} → {tempo_str}\n", tag)
-
-        if tempos_metodo.get("md5") and tempos_metodo.get("bcrypt"):
-            razao = tempos_metodo["bcrypt"] / tempos_metodo["md5"] if tempos_metodo["md5"] > 0 else 0
-            self.texto_benchmark.insert(tk.END,
-                f"\n⚡ Bcrypt levou ~{int(razao)}x mais tempo que MD5 para o mesmo ataque!\n", "safe")
-
-        self.texto_benchmark.insert(tk.END,
-            "\nIsso é PROPOSITAL — quanto mais lento, mais seguro contra força bruta.\n", "result")
-        self.texto_benchmark.insert(tk.END,
-            "(GPUs aceleram MD5/SHA enormemente, mas NÃO bcrypt)\n\n", "result")
-
-        # Explicação didática do que os números significam
-        self.texto_benchmark.insert(tk.END, "═" * 65 + "\n", "header")
-        self.texto_benchmark.insert(tk.END, "💡 COMO INTERPRETAR ESSES RESULTADOS\n", "header")
-        self.texto_benchmark.insert(tk.END, "═" * 65 + "\n\n", "header")
-
-        self.texto_benchmark.insert(tk.END,
-            "\"Se foi tão rápido, por que a estimativa fala em horas/dias?\"\n\n", "safe")
-        self.texto_benchmark.insert(tk.END,
-            "O ataque acima testou apenas 100 senhas comuns contra poucos\n"
-            "usuários — por isso terminou em menos de 1 segundo.\n\n")
-        self.texto_benchmark.insert(tk.END,
-            "Mas senhas como '123456' são as PRIMEIRAS que um atacante testa.\n"
-            "Se a senha for forte (ex: 'K#8mPx!qZ2$n'), ela NÃO estará em\n"
-            "nenhum dicionário. O atacante terá que testar TODAS as combinações\n"
-            "possíveis (força bruta), e aí o número de tentativas explode:\n\n", "result")
-        self.texto_benchmark.insert(tk.END,
-            "  • 8 chars minúsculos:           ~209 bilhões de combinações\n"
-            "  • 8 chars com maiúsc+números:    ~218 trilhões\n"
-            "  • 12 chars com tudo + especiais: ~475 quatrilhões\n\n")
-        self.texto_benchmark.insert(tk.END,
-            "A estimativa pega o tempo REAL medido por tentativa neste PC\n"
-            "e extrapola: \"a esta velocidade, quanto demoraria pra testar\n"
-            "1 bilhão de senhas?\" — e a diferença fica gritante:\n\n", "result")
-        self.texto_benchmark.insert(tk.END,
-            "  MD5      →  cada tentativa leva nanosegundos  → horas\n", "danger")
-        self.texto_benchmark.insert(tk.END,
-            "  Bcrypt   →  cada tentativa leva ~100ms        → MESES/ANOS\n\n", "safe")
-        self.texto_benchmark.insert(tk.END,
-            "CONCLUSÃO: Bcrypt não impede que '123456' seja descoberta\n"
-            "(porque é a 1ª senha de qualquer dicionário). Mas torna\n"
-            "IMPRATICÁVEL testar todas as combinações de uma senha forte.\n"
-            "A segurança real = bcrypt + senha forte + bloqueio de tentativas.\n", "safe")
-
+        self.texto_benchmark.insert(tk.END, "⏳ Executando benchmark de performance...\n\n", "header")
         self.texto_benchmark.configure(state="disabled")
+        thread = threading.Thread(target=self._executar_benchmark, daemon=True)
+        thread.start()
+
+    def _log_benchmark(self, texto, tag="normal"):
+        """Escreve no console de benchmark de forma thread-safe."""
+        def _insert():
+            self.texto_benchmark.configure(state="normal")
+            self.texto_benchmark.insert(tk.END, texto, tag if tag != "normal" else ())
+            self.texto_benchmark.see(tk.END)
+            self.texto_benchmark.configure(state="disabled")
+        self.after(0, _insert)
+
+    def _formatar_tempo(self, segundos):
+        """Formata segundos em unidade legível."""
+        if segundos < 0.001:
+            return f"{segundos*1_000_000:.0f} µs"
+        if segundos < 1:
+            return f"{segundos*1000:.1f} ms"
+        if segundos < 60:
+            return f"{segundos:.1f} segundos"
+        if segundos < 3600:
+            return f"{segundos/60:.1f} minutos"
+        if segundos < 86400:
+            return f"{segundos/3600:.1f} horas"
+        if segundos < 86400 * 365:
+            return f"{segundos/86400:.0f} dias"
+        return f"{segundos/(86400*365):.0f} anos"
+
+    def _executar_benchmark(self):
+        """Benchmark puro de performance: mede velocidade de hash de cada método
+        e demonstra o impacto do bloqueio de tentativas na força bruta."""
+        import bcrypt as _bcrypt
+        salt_teste = os.urandom(16).hex()
+        bcrypt_salt = _bcrypt.gensalt()
+
+        self._log_benchmark("=" * 70 + "\n", "header")
+        self._log_benchmark("  BENCHMARK: Performance de Força Bruta por Método\n", "header")
+        self._log_benchmark("=" * 70 + "\n\n", "header")
+        self._log_benchmark(
+            "  Este benchmark mede a VELOCIDADE de computação de hash de cada\n"
+            "  método. Quanto mais rápido o hash, mais fácil é para um atacante\n"
+            "  executar força bruta. O objetivo é mostrar que métodos mais lentos\n"
+            "  (como Bcrypt) protegem melhor contra esse tipo de ataque.\n\n"
+            "  Cenário: o banco de dados vazou e o atacante está tentando\n"
+            "  descobrir as senhas originais testando combinações.\n\n"
+        )
+
+        self._log_benchmark("── TESTE 1: Velocidade de Computação de Hash ──\n\n", "header")
+
+        resultados = {}
+
+        n_md5 = 100_000
+        self._log_benchmark(f"  MD5: computando {n_md5:,} hashes...\n")
+        inicio = time.time()
+        for i in range(n_md5):
+            hashlib.md5(f"senha{i}".encode()).hexdigest()
+        tempo_md5 = time.time() - inicio
+        rate_md5 = n_md5 / tempo_md5
+        resultados["md5"] = rate_md5
+        self._log_benchmark(
+            f"  → {n_md5:,} hashes em {tempo_md5:.4f}s = {rate_md5:,.0f} hashes/seg\n\n", "danger"
+        )
+
+        n_sha = 100_000
+        self._log_benchmark(f"  SHA-256 + Salt: computando {n_sha:,} hashes...\n")
+        inicio = time.time()
+        for i in range(n_sha):
+            hashlib.sha256((f"senha{i}" + salt_teste).encode()).hexdigest()
+        tempo_sha = time.time() - inicio
+        rate_sha = n_sha / tempo_sha
+        resultados["salt"] = rate_sha
+        self._log_benchmark(
+            f"  → {n_sha:,} hashes em {tempo_sha:.4f}s = {rate_sha:,.0f} hashes/seg\n\n", "result"
+        )
+
+        n_bcrypt = 5
+        self._log_benchmark(f"  Bcrypt: computando {n_bcrypt} hashes (lento de propósito!)...\n")
+        inicio = time.time()
+        for i in range(n_bcrypt):
+            _bcrypt.hashpw(f"senha{i}".encode(), bcrypt_salt)
+        tempo_bcrypt = time.time() - inicio
+        rate_bcrypt = n_bcrypt / tempo_bcrypt
+        resultados["bcrypt"] = rate_bcrypt
+        self._log_benchmark(
+            f"  → {n_bcrypt} hashes em {tempo_bcrypt:.4f}s = {rate_bcrypt:.1f} hashes/seg\n\n", "safe"
+        )
+
+        self._log_benchmark("── TESTE 2: Tabela Comparativa ──\n\n", "header")
+        self._log_benchmark(f"  {'Método':<22} {'Hashes/segundo':>18}  {'Relativo ao MD5':>16}\n")
+        self._log_benchmark("  " + "─" * 60 + "\n")
+
+        for metodo, nome, tag in [("md5", "MD5", "danger"), ("salt", "SHA-256 + Salt", "result"),
+                                   ("bcrypt", "Bcrypt", "safe")]:
+            rate = resultados[metodo]
+            relativo = rate / rate_md5
+            if rate >= 1000:
+                rate_str = f"{rate:,.0f}"
+            else:
+                rate_str = f"{rate:.1f}"
+            self._log_benchmark(f"  {nome:<22} {rate_str:>18}  {relativo:>15.6f}x\n", tag)
+
+        razao = rate_md5 / rate_bcrypt
+        self._log_benchmark(f"\n  ⚡ MD5 é ~{razao:,.0f}x mais rápido que Bcrypt!\n", "danger")
+        self._log_benchmark(
+            f"  Isso significa: no tempo que o atacante testa 1 senha em Bcrypt,\n"
+            f"  ele consegue testar {razao:,.0f} senhas em MD5.\n\n", "danger"
+        )
+
+        self._log_benchmark("── TESTE 3: Tempo Estimado para Força Bruta (Ataque Offline) ──\n\n", "header")
+        self._log_benchmark(
+            "  Simulação: quanto tempo levaria para testar todas as combinações\n"
+            "  possíveis usando a velocidade medida neste computador?\n\n"
+        )
+
+        cenarios = [
+            (1_000_000, "6 dígitos numéricos (10⁶)"),
+            (1_000_000_000, "Senha média — 10⁹ combinações"),
+            (1_000_000_000_000, "Senha forte — 10¹² combinações"),
+        ]
+
+        for n_comb, desc in cenarios:
+            self._log_benchmark(f"  Cenário: {desc}\n")
+            for metodo, nome, tag in [("md5", "MD5", "danger"), ("salt", "SHA-256 + Salt", "result"),
+                                       ("bcrypt", "Bcrypt", "safe")]:
+                rate = resultados[metodo]
+                tempo = n_comb / rate
+                self._log_benchmark(f"    {nome:<22} → {self._formatar_tempo(tempo)}\n", tag)
+            self._log_benchmark("\n")
+
+        self._log_benchmark("── TESTE 4: Impacto do Bloqueio de Login (3 tentativas) ──\n\n", "header")
+        self._log_benchmark(
+            "  Diferente do ataque offline (banco vazou), no ataque ONLINE o\n"
+            "  atacante tenta fazer login direto no sistema. Nesse cenário,\n"
+            "  o bloqueio por tentativas é devastador para o atacante:\n\n"
+        )
+        self._log_benchmark("  Regra: 3 tentativas erradas → bloqueio de 30 segundos\n")
+        self._log_benchmark("  Taxa efetiva: 3 tentativas / 30 seg = 0.1 tentativa/seg\n\n", "result")
+
+        rate_bloqueio = 3.0 / 30.0
+
+        self._log_benchmark(
+            f"  {'Cenário':<32} {'MD5 sem bloqueio':<22} {'COM bloqueio'}\n"
+        )
+        self._log_benchmark("  " + "─" * 72 + "\n")
+
+        for n_comb, desc in cenarios:
+            tempo_sem = n_comb / rate_md5
+            tempo_com = n_comb / rate_bloqueio
+            self._log_benchmark(
+                f"  {desc:<32} {self._formatar_tempo(tempo_sem):<22} "
+                f"{self._formatar_tempo(tempo_com)}\n"
+            )
+
+        self._log_benchmark(
+            "\n  Perceba: mesmo usando MD5 (o hash mais rápido), o bloqueio de\n", "safe"
+        )
+        self._log_benchmark(
+            "  login transforma um ataque de segundos/minutos em ANOS.\n", "safe"
+        )
+        self._log_benchmark(
+            "  O atacante fica limitado a ~6 tentativas por minuto!\n\n", "safe"
+        )
+
+        self._log_benchmark("=" * 70 + "\n", "header")
+        self._log_benchmark("  CONCLUSÃO\n", "header")
+        self._log_benchmark("=" * 70 + "\n\n", "header")
+
+        self._log_benchmark("  ATAQUE OFFLINE (banco vazou — sem bloqueio):\n", "result")
+        self._log_benchmark("    MD5          → quebrado em segundos/minutos (INSEGURO)\n", "danger")
+        self._log_benchmark("    SHA-256+Salt → mais lento, mas GPUs aceleram (MODERADO)\n", "result")
+        self._log_benchmark("    Bcrypt       → anos/séculos para força bruta (SEGURO)\n\n", "safe")
+
+        self._log_benchmark("  ATAQUE ONLINE (tentando login no sistema):\n", "result")
+        self._log_benchmark("    Sem bloqueio  → depende do hash (MD5 cai rápido)\n", "danger")
+        self._log_benchmark("    Com bloqueio  → INVIÁVEL para qualquer método!\n\n", "safe")
+
+        self._log_benchmark(
+            "  A defesa ideal combina as três camadas:\n"
+            "    1. Bcrypt (hash lento) — protege se o banco vazar\n"
+            "    2. Bloqueio de tentativas — impede força bruta online\n"
+            "    3. Senha forte — aumenta o espaço de busca exponencialmente\n", "safe"
+        )
 
     # ============================================================
     # EVENTOS
